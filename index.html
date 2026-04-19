@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Voice Input</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #1e293b;
+      --text: #e2e8f0;
+      --accent: #22c55e;
+      --accent2: #f59e0b;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Noto Sans CJK SC", sans-serif;
+      color: var(--text);
+      background: radial-gradient(circle at 20% 20%, #1d4ed8 0, transparent 40%),
+                  radial-gradient(circle at 80% 80%, #16a34a 0, transparent 40%),
+                  var(--bg);
+      display: grid;
+      place-items: center;
+      padding: 16px;
+    }
+    .app {
+      width: min(680px, 100%);
+      background: color-mix(in oklab, var(--panel) 90%, black);
+      border: 1px solid #334155;
+      border-radius: 16px;
+      padding: 16px;
+      backdrop-filter: blur(4px);
+    }
+    .mode-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .token-row {
+      margin-bottom: 12px;
+    }
+    .token-input {
+      width: 100%;
+      height: 40px;
+      border: 1px solid #475569;
+      background: #0b1220;
+      color: var(--text);
+      border-radius: 10px;
+      padding: 0 12px;
+      font-size: 14px;
+    }
+    .mode-btn {
+      height: 44px;
+      border: 1px solid #475569;
+      background: #0b1220;
+      color: var(--text);
+      border-radius: 10px;
+      font-size: 16px;
+    }
+    .mode-btn.active { border-color: var(--accent2); }
+    .record-btn {
+      width: 100%;
+      height: 72px;
+      font-size: 24px;
+      border: 0;
+      border-radius: 12px;
+      color: #04130a;
+      background: linear-gradient(90deg, #22c55e, #4ade80);
+    }
+    .recording .record-btn {
+      background: linear-gradient(90deg, #f97316, #ef4444);
+      color: #250400;
+    }
+    #status {
+      margin-top: 12px;
+      padding: 12px;
+      border-radius: 10px;
+      background: #020617;
+      border: 1px solid #1e293b;
+      white-space: pre-wrap;
+      min-height: 70px;
+      line-height: 1.4;
+    }
+    .hint {
+      margin-top: 10px;
+      color: #94a3b8;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <main class="app" id="appRoot">
+    <div class="mode-row">
+      <button class="mode-btn active" data-mode="normal" id="normalBtn">Normal Mode</button>
+      <button class="mode-btn" data-mode="code" id="codeBtn">Code Mode</button>
+    </div>
+    <div class="token-row">
+      <input id="tokenInput" class="token-input" type="password" placeholder="Access Token (if enabled)" autocomplete="off" />
+    </div>
+    <button id="recordBtn" class="record-btn">Start Recording</button>
+    <div id="status">Idle</div>
+    <div class="hint">Command words: newline / backspace / send</div>
+  </main>
+
+  <script>
+    let mediaRecorder;
+    let chunks = [];
+    let stream;
+    let recording = false;
+    let mode = "normal";
+    const TOKEN_STORAGE_KEY = "voice_input_token";
+
+    const appRoot = document.getElementById("appRoot");
+    const btn = document.getElementById("recordBtn");
+    const statusEl = document.getElementById("status");
+    const modeButtons = document.querySelectorAll(".mode-btn");
+    const tokenInput = document.getElementById("tokenInput");
+
+    function pickRecorderOptions() {
+      if (typeof MediaRecorder === "undefined") return undefined;
+      const candidates = ["audio/mp4", "audio/webm;codecs=opus", "audio/webm"];
+      for (const mimeType of candidates) {
+        if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(mimeType)) {
+          return { mimeType };
+        }
+      }
+      return undefined;
+    }
+
+    function extensionFromMimeType(mimeType) {
+      if (!mimeType) return "webm";
+      if (mimeType.includes("mp4")) return "mp4";
+      if (mimeType.includes("mpeg")) return "mp3";
+      if (mimeType.includes("wav")) return "wav";
+      if (mimeType.includes("ogg")) return "ogg";
+      if (mimeType.includes("webm")) return "webm";
+      return "webm";
+    }
+
+    function setStatus(text) {
+      statusEl.textContent = text;
+    }
+
+    function getSavedToken() {
+      return localStorage.getItem(TOKEN_STORAGE_KEY) || "";
+    }
+
+    function saveToken(value) {
+      localStorage.setItem(TOKEN_STORAGE_KEY, value);
+    }
+
+    async function ensureMicStream() {
+      if (stream && stream.getTracks().some((t) => t.readyState === "live")) {
+        return stream;
+      }
+
+      const getUserMediaFn =
+        navigator.mediaDevices &&
+        typeof navigator.mediaDevices.getUserMedia === "function"
+          ? navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices)
+          : null;
+
+      if (!getUserMediaFn) {
+        throw new Error("Microphone API is unavailable here. Use HTTPS on iPhone Safari.");
+      }
+
+      stream = await getUserMediaFn({ audio: true });
+      return stream;
+    }
+
+    function checkMicSupport() {
+      if (!window.isSecureContext) {
+        setStatus("Microphone needs a secure context on iPhone Safari. Open this page over HTTPS.");
+        return false;
+      }
+
+      const getUserMediaFn =
+        typeof navigator !== "undefined" &&
+        navigator.mediaDevices &&
+        typeof navigator.mediaDevices.getUserMedia === "function"
+          ? navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices)
+          : null;
+
+      if (getUserMediaFn) return true;
+
+      const hasMediaDevices =
+        typeof navigator !== "undefined" &&
+        navigator.mediaDevices &&
+        typeof navigator.mediaDevices.getUserMedia === "function";
+
+      if (!hasMediaDevices) {
+        setStatus("This browser/device does not expose getUserMedia in the current page context.");
+      }
+      return false;
+    }
+
+    function setMode(nextMode) {
+      mode = nextMode;
+      modeButtons.forEach((b) => b.classList.toggle("active", b.dataset.mode === nextMode));
+      setStatus(`Mode: ${mode === "normal" ? "Normal" : "Code"}`);
+    }
+
+    modeButtons.forEach((b) => {
+      b.addEventListener("click", () => setMode(b.dataset.mode));
+    });
+
+    tokenInput.value = getSavedToken();
+    tokenInput.addEventListener("change", () => {
+      saveToken(tokenInput.value.trim());
+    });
+
+    btn.onclick = async () => {
+      try {
+        if (!checkMicSupport()) {
+          return;
+        }
+        if (!recording) {
+          const currentStream = await ensureMicStream();
+          const recorderOptions = pickRecorderOptions();
+          mediaRecorder = recorderOptions ? new MediaRecorder(currentStream, recorderOptions) : new MediaRecorder(currentStream);
+          chunks = [];
+
+          mediaRecorder.ondataavailable = (e) => chunks.push(e.data);
+          mediaRecorder.onstop = async () => {
+            try {
+              const detectedType =
+                (chunks.find((c) => c && c.type && c.type.length > 0) || {}).type ||
+                mediaRecorder.mimeType ||
+                "audio/webm";
+              const ext = extensionFromMimeType(detectedType);
+              const blob = new Blob(chunks, { type: detectedType });
+              const form = new FormData();
+              form.append("file", blob, `speech.${ext}`);
+              form.append("mode", mode);
+              const token = tokenInput.value.trim();
+              if (token !== getSavedToken()) {
+                saveToken(token);
+              }
+
+              setStatus("Uploading...");
+              const resp = await fetch("/transcribe", {
+                method: "POST",
+                headers: token ? { "X-Voice-Token": token } : undefined,
+                body: form,
+              });
+
+              if (!resp.ok) {
+                const text = await resp.text();
+                setStatus(`Error: ${text || `HTTP ${resp.status}`}`);
+                return;
+              }
+
+              const data = await resp.json();
+              setStatus(`Transcript: ${data.text || "(empty)"}`);
+            } catch (err) {
+              setStatus(`Error: ${err.message || "Upload failed"}`);
+            } finally {
+              recording = false;
+              appRoot.classList.remove("recording");
+              btn.textContent = "Start Recording";
+            }
+          };
+
+          mediaRecorder.start();
+          recording = true;
+          appRoot.classList.add("recording");
+          btn.textContent = "Stop Recording";
+          setStatus("Recording...");
+        } else {
+          if (mediaRecorder && mediaRecorder.state !== "inactive") {
+            mediaRecorder.stop();
+          }
+          setStatus("Uploading...");
+        }
+      } catch (err) {
+        recording = false;
+        appRoot.classList.remove("recording");
+        btn.textContent = "Start Recording";
+        setStatus(`Error: ${err.message}`);
+      }
+    };
+
+    window.addEventListener("pagehide", () => {
+      if (stream) {
+        stream.getTracks().forEach((t) => t.stop());
+      }
+    });
+  </script>
+</body>
+</html>
