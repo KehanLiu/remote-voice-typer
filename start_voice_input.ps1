@@ -124,6 +124,25 @@ function Restart-BackendProcess {
     return $backend
 }
 
+function Get-NgrokFailureMessage {
+    param([string]$StdErrLog)
+
+    if (!(Test-Path -LiteralPath $StdErrLog)) {
+        return "ngrok stopped unexpectedly. Check logs\ngrok.err.log"
+    }
+
+    $errText = Get-Content -LiteralPath $StdErrLog -Raw -ErrorAction SilentlyContinue
+    if ([string]::IsNullOrWhiteSpace($errText)) {
+        return "ngrok stopped unexpectedly. Check logs\ngrok.err.log"
+    }
+
+    if ($errText -match "ERR_NGROK_121" -or $errText -match "version .* is too old") {
+        return "ngrok is too old for this account. Run 'ngrok update' or reinstall/upgrade ngrok, then rerun start_voice_input.bat. Details: logs\ngrok.err.log"
+    }
+
+    return "ngrok stopped unexpectedly. Check logs\ngrok.err.log"
+}
+
 Push-Location $PSScriptRoot
 try {
     Load-DotEnv -Path (Join-Path $PSScriptRoot ".env")
@@ -228,7 +247,7 @@ try {
         [void]$procs.Add($ngrok)
 
         if ($ngrok.HasExited) {
-            throw "ngrok exited early. Check logs\ngrok.err.log"
+            throw (Get-NgrokFailureMessage -StdErrLog $ngrokErrLog)
         }
     }
 
@@ -237,7 +256,7 @@ try {
     for ($i = 0; $i -lt 60; $i++) {
         Start-Sleep -Milliseconds 750
         if ($null -ne $ngrok -and $ngrok.HasExited) {
-            throw "ngrok stopped unexpectedly. Check logs\ngrok.err.log"
+            throw (Get-NgrokFailureMessage -StdErrLog $ngrokErrLog)
         }
 
         try {
